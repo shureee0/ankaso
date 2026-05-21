@@ -277,3 +277,8 @@ async function loadDictionary() {
 
 // Load dictionary when page loads
 document.addEventListener('DOMContentLoaded', loadDictionary);
+
+function toggleSidebar() {
+    document.getElementById("sidebar").classList.toggle("hidden");
+    document.getElementById("sidebar-btn").classList.toggle("hidden");
+}

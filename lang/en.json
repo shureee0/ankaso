@@ -20,7 +20,7 @@
   },
   "an": {
     "general": ["single", "only", "one"],
-    "root": ["single", "only"],
+    "root": ["single", "only", "uni", "mono", "alone"],
     "o-form": ["one"]
   },
   "anta": {
@@ -62,9 +62,19 @@
     "general": ["in", "on", "at"],
     "root": ["in", "on", "at", "during", "in that", "into", "onto"]
   },
+  "ka": {
+    "general": ["ity", "ize", "ify"],
+    "root": ["ite", "ize", "ify", "property of"],
+    "o-form": ["ity"]
+  },
   "te": {
     "general": ["of", "from", "that"],
     "root": ["of", "from", "that", "since"],
     "tags": ["subordinate", "relative", "clause"]
+  },
+  "sa": {
+    "general": ["say", "speak", "language"],
+    "root": ["say", "said", "speak", "spoken", "talk", "talked"],
+    "o-form": ["speech", "language", "talk", "speak"]
   }
 }

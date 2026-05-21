@@ -49,6 +49,14 @@
   "en": {
     "root": "en"
   },
+  "ka": {
+    "root": "ka",
+    "o-form": "ko"
+  },
+  "sa": {
+    "root": "sa",
+    "o-form": "so"
+  },
   "te": {
     "root": "te"
   }

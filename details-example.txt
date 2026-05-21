@@ -1,7 +1,0 @@
-ai (3rem, color: text-highlight)
-hello, hi, hey, greet, greeted (2rem, color: text)
-
-gap: 2rem
-
-aio (3rem, color: text-highlight)
-greeting, greetings (2rem, color: text)

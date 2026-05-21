@@ -8,11 +8,12 @@
     <link rel="icon" type="image/svg" href="../ankaso_icon.svg">
   </head>
   <body class="dictionary-page">
-    <header class="top-bar">
-      <a href="../">
-        <img src="../ankaso.svg" alt="Ankaso" class="logo-small">
-      </a>
-    </header>
+    <div class="sidebar", id="sidebar">
+      <div>
+        <a href="../"><img src="../ankaso.svg" alt="Ankaso" class="logo-sidebar"></a>
+      </div>
+    </div>
+    <button class="sidebar-btn" id="sidebar-btn" onclick="toggleSidebar()">☰</button>
     <main class="dictionary-container">
       <div class="search-container">
         <div id="results" class="dictionary-results"></div>

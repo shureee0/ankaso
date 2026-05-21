@@ -56,13 +56,6 @@ body {
     margin: 0;
 }
 
-.logo-small {
-    margin-top: 0.3rem;
-    height: clamp(1rem, 6vw, 2rem);
-    width: auto;
-    object-fit: contain;
-}
-
 .buttons {
     width: min(100%, 25rem);
     display: flex;
@@ -100,18 +93,51 @@ body {
     margin-top: 4rem;
 }
 
-.top-bar {
+/* Sidebar */
+
+.sidebar {
     position: fixed;
     top: 0;
     left: 0;
-    width: 100%;
-    height: clamp(2rem, 8vw, 3rem);
-    background-color: var(--window-dark);
+    width: 14rem;
+    height: 100vh;
     display: flex;
-    align-items: center;
-    padding: 0 1rem;
-    box-shadow: 0 0.2rem 0 0 var(--window);
+    align-items: left;
+    padding: 1rem 1rem;
+    box-sizing: border-box;
     z-index: 1000;
+
+    transition: transform 0.3s ease;
+}
+
+.sidebar.hidden {
+    transform: translateX(-100%);
+}
+
+.sidebar-btn {
+    position: fixed;
+    top: 1.75rem;
+    left: 13rem;
+    z-index: 1000;
+
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 1.5rem;
+    border: none;
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    border-radius: 8px;
+    
+    transition: transform 0.3s ease;
+}
+
+.sidebar-btn.hidden {
+    transform: translateX(-11rem);
+}
+
+.logo-sidebar {
+    margin: 1rem 1rem;
+    height: clamp(1rem, 6vw, 2.5rem);
 }
 
 /* Dictionary */
@@ -134,7 +160,7 @@ body {
 
 .search-input {
     position: fixed;
-    top: 5rem;
+    top: 2rem;
     left: 50%;
     transform: translateX(-50%);
     width: min(100%, 25rem);
@@ -160,7 +186,7 @@ body {
 }
 
 .dictionary-results {
-    margin-top: 5rem;
+    margin-top: 1rem;
     margin-bottom: 10rem;
     width: 100%;
     display: flex;
@@ -264,7 +290,7 @@ body {
 
 .details-container {
     position: sticky;
-    top: clamp(8rem, 24vw, 10rem);
+    top: clamp(5rem, 24vw, 7rem);
     align-self: start;
     max-height: calc(100vh - clamp(6rem, 7vw, 7rem) - 2rem);
     overflow-y: auto;
@@ -308,7 +334,7 @@ body {
 
 :root {
     --shadow: oklch(0 0 0 / 0.5);
-    --background-dark: oklch(0.16 0.004 285);
+    --background-dark: oklch(0.15 0.006 285);
     --window-dark: oklch(0.18 0.008 270);
     --window: oklch(0.22 0.01 260);
     --window-highlight: oklch(0.3 0.01 260);
