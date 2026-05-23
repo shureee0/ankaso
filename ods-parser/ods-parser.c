@@ -29,7 +29,10 @@
 #define SV_JS_NULL sv_from_cstr("null")
 
 #define SV_EMPTY (String_View){.data = 0,.count = 0};
+#define HASHINDEX_EMPTY (HashIndex){.generation = 0,.index = 0};
 #define IS_SV_EMPTY(sv) ((sv).data == 0 && (sv).count == 0)
+
+#define sv_free(sv) NOB_FREE((void*)((sv).data))
 // :empty switch for your copypasting needs
 /*
 static_assert(__XmlTabType_count == 0,"update FUNCTION_NAME\n");
@@ -75,6 +78,17 @@ String_Builder en_js_buffer = {0};
 
 //TODO: put structs and declarations in ods-parser.h
 // :structs
+typedef struct{
+	size_t index;
+	size_t generation;
+}HashIndex;
+
+typedef struct{
+	HashIndex *items;
+	size_t count;
+	size_t capacity;
+}HashIndices;
+
 /*
  * da is a "type" given in nob.h
  * which allows for dynamic arrays
@@ -90,18 +104,18 @@ typedef struct{
 }String_Views;
 
 typedef struct{
-	String_View root;
+	HashIndex root;
 	String_Views general;
 	String_Views root_meaning;
 }EN_Word;
 
 typedef struct{
-	String_View root;
+	HashIndex root;
 }Ankaso_Word;
 
 typedef struct{
-	String_View name;
-	String_View value;
+	HashIndex name;
+	HashIndex value;
 }Attribute;
 
 typedef struct{
@@ -122,8 +136,8 @@ typedef struct{
 	XmlTabType tab_type;
 	uint64_t indent;
 	union{
-		String_View type;
-		String_View content;
+		HashIndex type;
+		HashIndex content;
 	};
 	Attributes atts;
 }XmlTab;
@@ -144,8 +158,113 @@ typedef struct{
 // :forward decs
 static inline bool is_white_space(char c);
 static inline bool inc_sv(String_View *sv);
-bool parse_textspan(String_View *content,XmlTabs *tabs,String_Builder *out,size_t indent,String_View end);
 bool parse_content(String_View *content,XmlTabs *tabs,String_Builder *out,size_t indent,String_View end);
+bool close_tab(XmlTabs *tabs);
+String_View sv_cpy(String_View sv);
+
+// :memory
+#define HASH_TABLE_SIZE (1024*1024)
+// hash_table_size should fit in int for errors
+static_assert((int)(1 << 30) > (int)HASH_TABLE_SIZE,"hash table size is bigger than positive side of int");
+typedef struct{//soa
+	String_View svs[HASH_TABLE_SIZE];
+	size_t ref_counts[HASH_TABLE_SIZE];
+	size_t generation[HASH_TABLE_SIZE];
+}RefHashTable;
+
+RefHashTable reftable = {0};
+// :helpers
+
+//static inline bool hashindex_eq(HashIndex lhs,HashIndex rhs){
+//	return lhs.index == rhs.index && lhs.generation == rhs.generation;
+//}
+
+static inline bool is_valid_hashindex(HashIndex hi){
+	if(!(hi.index < HASH_TABLE_SIZE)) return false;
+	if(!(hi.generation == reftable.generation[hi.index])) return false;
+	if(!(reftable.ref_counts[hi.index] > 0)) return false;
+	return true;
+}
+
+static inline String_View get_sv_from_hashindex(HashIndex hi){
+	if(!is_valid_hashindex(hi)) assert(false && "not valid hi");
+	return reftable.svs[hi.index];
+}
+
+size_t hash_from_sv(String_View sv){
+	//TODO: very bad hash function
+	size_t hash = 0;
+	do{
+		char c = sv.data[0];
+		hash += (13 * (c + 69)) % HASH_TABLE_SIZE;
+	}while(inc_sv(&sv));
+	return hash % HASH_TABLE_SIZE;
+}
+
+int hash_get_sv(String_View sv){
+	//will return first empty or already matching sv
+	//return -1 when the sv was not found in the hash table
+	const size_t hash_i = hash_from_sv(sv);
+	size_t i = hash_i;
+	for(;;){
+		if(reftable.ref_counts[i] == 0) break;
+		if(reftable.ref_counts[i] > 0 && sv_eq(sv,reftable.svs[i])) return i;
+		i = (i + 1) % HASH_TABLE_SIZE;
+		if(i == hash_i) break;
+	}
+	return -1;
+}
+
+HashIndex hash_add_sv(String_View sv){
+	static size_t gen_i = 0;
+	{//check if already exsits
+		int i = hash_get_sv(sv);
+		if(i >= 0){ 
+			reftable.ref_counts[i] += 1; 
+			return (HashIndex){.generation = reftable.generation[i],.index = i};
+		}
+	}
+	//add new sv to hashtable 
+	size_t hash_i = hash_from_sv(sv);
+	size_t i = hash_i;
+	String_View out = sv_cpy(sv);
+	if(out.data == NULL){
+		nob_log(NOB_ERROR,"out of the ram this is bad aborting");
+		abort();
+	}
+	for(;;){
+		if(reftable.ref_counts[i] == 0){
+			reftable.svs[i] = out;
+			reftable.ref_counts[i] = 1;
+			reftable.generation[i] = ++gen_i;
+			return (HashIndex){.generation = reftable.generation[i],.index = i};
+		}
+		i = (i + 1) % HASH_TABLE_SIZE;
+		if(i == hash_i) break;
+	}	
+	assert(false && "all slots in hash table filled");
+}
+
+void hash_remove_by_hashindex(HashIndex hi){
+	if(!is_valid_hashindex(hi)) assert(false && "not valid hi");
+	reftable.ref_counts[hi.index] -= 1;
+	if(reftable.ref_counts[hi.index] == 0) sv_free(reftable.svs[hi.index]);
+}
+
+void hash_remove_by_hashindices(HashIndices his){
+	for(size_t i = 0;i < his.count;++i){
+		hash_remove_by_hashindex(his.items[i]);
+	}
+	da_free(his);
+}
+
+void hash_remove_sv(String_View sv){
+	int i = hash_get_sv(sv);
+	//if(i < 0) assert(false && "double free");
+	if(i < 0) return;
+	reftable.ref_counts[i] -= 1;
+	if(reftable.ref_counts[i] == 0) sv_free(reftable.svs[i]);
+}
 
 static inline String_Builder sv_to_sb(String_View sv){
 	return (String_Builder){.count = sv.count,.capacity = sv.count,.items = (void*)sv.data};
@@ -178,7 +297,7 @@ bool get_content(String_View* out){
 		defer(false);
 	}
 
-	size_t size;
+	size_t size = 0;
 	//TODO: maybe this needs to use custom alocator
 	//or memcpy
 	nob_log(NOB_INFO,"extracting content.xml from zip to heap");
@@ -193,6 +312,7 @@ defer:
 	mz_zip_reader_end(&zip_archive);
 	return result;
 }
+
 
 String_Views get_entrys_from_sv(String_View sv){
 	/*
@@ -223,8 +343,6 @@ String_Views get_entrys_from_sv(String_View sv){
 	return result;
 }
 
-// :xml parsing
-
 String_View sv_cpy(String_View sv){
 	char *temp = malloc(sv.count);
 	if(temp == NULL) return (String_View){.data = NULL};
@@ -254,8 +372,9 @@ static inline bool inc_sv(String_View *sv){
  */
 bool get_next_tab(String_View *sv,XmlTab* out){
 	//TODO: add better error messages
+	assert(sv->count > 0 && "sv count was not check before passing to get_next_tab");
 	bool result = true; //defer
-	*out = (XmlTab){0};//TODO:
+	*out = (XmlTab){0};
 
 	String_Builder sb = {0};
 	bool first = false;
@@ -269,11 +388,7 @@ bool get_next_tab(String_View *sv,XmlTab* out){
 			sb_append(&sb,sv->data[0]);
 			if(!inc_sv(sv)) defer(false);
 		}
-		out->content = sv_cpy(sb_to_sv(sb));
-		if(out->content.data == NULL){
-			printf("OUT OF RAM OH NO!!!!");
-			defer(false);
-		}	
+		out->content = hash_add_sv(sb_to_sv(sb));
 		defer(true);
 	}
 	if(!inc_sv(sv)) defer(false);
@@ -297,16 +412,7 @@ bool get_next_tab(String_View *sv,XmlTab* out){
 			defer(false);
 		}
 		if(is_white_space(sv->data[0]) || sv->data[0] == '?'){
-			//TODO: bit of a memory leak 
-			//sv_cpy should be replaced with 
-			//a better memory system
-			//this is not that bad right now since the content.xml
-			//is small but is could be a problum later
-			out->type = sv_cpy(sb_to_sv(sb));
-			if(out->type.data == NULL){
-				printf("OUT OF RAM OH NO!!!!");
-				defer(false);
-			}
+			out->type = hash_add_sv(sb_to_sv(sb));
 			if(sv->data[0] != '?') if(!inc_sv(sv)) defer(false);
 			sb.count = 0;//clean sb
 			break;
@@ -320,16 +426,7 @@ bool get_next_tab(String_View *sv,XmlTab* out){
 			defer(false);
 		}
 		if(is_white_space(sv->data[0]) || sv->data[0] == '/' || sv->data[0] == '>'){
-			//TODO: bit of a memory leak 
-			//sv_cpy should be replaced with 
-			//a better memory system
-			//this is not that bad right now since the content.xml
-			//is small but is could be a problum later
-			out->type = sv_cpy(sb_to_sv(sb));
-			if(out->type.data == NULL){
-				printf("OUT OF RAM OH NO!!!!");
-				defer(false);
-			}
+			out->type = hash_add_sv(sb_to_sv(sb));
 			if(sv->data[0] != '/' && sv->data[0] != '>') if(!inc_sv(sv)) defer(false);
 			sb.count = 0;//clean sb
 			break;
@@ -373,8 +470,8 @@ bool get_next_tab(String_View *sv,XmlTab* out){
 			break;
 		}
 	//att_end end
-		String_View key;
-		String_View value;
+		HashIndex key;
+		HashIndex value;
 		// :key
 		for(;;){
 			if(sv->data[0] == '>' || sv->data[0] == '/' || sv->data[0] == '?'){
@@ -382,16 +479,7 @@ bool get_next_tab(String_View *sv,XmlTab* out){
 				defer(false);
 			}
 			if(is_white_space(sv->data[0]) || sv->data[0] == '='){
-				//TODO: bit of a memory leak 
-				//sv_cpy should be replaced with 
-				//a better memory system
-				//this is not that bad right now since the content.xml
-				//is small but is could be a problum later
-				key = sv_cpy(sb_to_sv(sb));
-				if(key.data == NULL){
-					printf("OUT OF RAM OH NO!!!!");
-					defer(false);
-				}	
+				key = hash_add_sv(sb_to_sv(sb));
 				sb.count = 0;//clean sb
 				if(sv->data[0] == '=') break;//break early so we can check for it
 				if(!inc_sv(sv)) defer(false); 
@@ -411,17 +499,7 @@ bool get_next_tab(String_View *sv,XmlTab* out){
 		*sv = sv_trim_left(*sv);
 		for(;;){
 			if(sv->data[0] == quote){
-				//printf("values\n");
-				//TODO: bit of a memory leak 
-				//sv_cpy should be replaced with 
-				//a better memory system
-				//this is not that bad right now since the content.xml
-				//is small but is could be a problum later
-				value = sv_cpy(sb_to_sv(sb));
-				if(value.data == NULL){
-					printf("OUT OF RAM OH NO!!!!");
-					defer(false);
-				}	
+				value = hash_add_sv(sb_to_sv(sb));
 				if(!inc_sv(sv)) defer(false); 
 				sb.count = 0;//clean sb
 				break;
@@ -430,12 +508,13 @@ bool get_next_tab(String_View *sv,XmlTab* out){
 			if(!inc_sv(sv)) defer(false);
 		}
 		//printf(SV_Fmt":\'"SV_Fmt"\'\n",SV_Arg(key),SV_Arg(value));
-		if(key.count == 0){
+		if(get_sv_from_hashindex(key).count == 0){
 			printf("ERROR: attribute name is empty\n");
 			defer(false);
 		}
-		if(value.count == 0) value = SV_JS_NULL;
-		da_append(&out->atts,((Attribute){.name = key,.value = value}));
+		//if(get_sv_from_hashindex(value).count == 0) value = SV_JS_NULL;//why did i do this?
+		Attribute att = (Attribute){.name = key,.value = value};
+		da_append(&(out->atts),att);
 	}
 defer:
 	sb_free(sb);//could avoid this with static
@@ -466,11 +545,12 @@ void sb_append_json_sv(String_Builder *sb,String_View sv){
 	sv = sv_trim(sv);
 	sb_append(sb,'\"');
 	do{
+		if(sv.count == 0) break;
 		char c = sv.data[0];
 		if(c == '\"') sb_append(sb,'\\');
 		sb_append(sb,c);
 	}while(inc_sv(&sv));
-	(void)da_pop(sb);//pop the null terminator
+	if(sv.count != 0) (void)da_pop(sb);//pop the null terminator
 	sb_append(sb,'\"');
 }
 
@@ -490,7 +570,8 @@ int get_attribute(XmlTab tab,String_View neddle){
 	 * att.count is size_t which is grater than
 	 * positive int
 	 */
-	for(int i = 0; i < (int)tab.atts.count;++i) if(sv_eq(neddle, tab.atts.items[i].name)) return i;
+	for(int i = 0; i < (int)tab.atts.count;++i) 
+		if(sv_eq(neddle, get_sv_from_hashindex(tab.atts.items[i].name))) return i;
 	return -1;
 }
 
@@ -500,25 +581,26 @@ bool parse_first_row(String_View *content,XmlTabs *tabs,uint64_t indent){
 	 * this is where we can unhard code the order of the columns
 	 */
 	bool result = true;
-	++indent;
 	XmlTab tab = {0};
 	for(;;){
 		if(content->count == 0) defer(false); //means we ended premucutly
-		if(!get_next_tab(content,&tab)){
-			defer(false);
-		}
+		if(!get_next_tab(content,&tab)) defer(false);
 		static_assert(__XmlTabType_count == 4,"update parse_first_row\n");
 		switch(tab.tab_type){
 			case XM_OPEN:{
 				tab.indent = indent++;
 				da_append(tabs,tab);
-				if(sv_eq(tab.type,ROW_SV)) defer(false);
+				if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)) defer(false);
 				break;
 			}
 			case XM_CLOSE:{
 				tab.indent = --indent;
 				da_append(tabs,tab);
-				if(sv_eq(tab.type,ROW_SV)) defer(true);
+				if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)){
+					close_tab(tabs);
+					defer(true);
+				}
+				close_tab(tabs);
 				break;
 			}
 			case XM_CONTENT:{
@@ -538,13 +620,23 @@ defer:
 	return result;
 }
 
-bool close_tab(XmlTabs *tabs,XmlTab tab){
+void free_tab(XmlTab tab){
+	hash_remove_by_hashindex(tab.type);
+	for(size_t i = 0;i < tab.atts.count;++i){
+		hash_remove_by_hashindex(tab.atts.items[i].name);
+		hash_remove_by_hashindex(tab.atts.items[i].value);
+	}
+	da_free(tab.atts);
+}
+
+bool close_tab(XmlTabs *tabs){
 	/*
 	 * TODO: when this cleans memory
 	 * we need to make sure we don't have use after frees
 	 * when we stop leaking memory
 	 * like we are using js
 	 */
+	XmlTab tab = da_pop(tabs);
 	assert(tab.tab_type == XM_CLOSE);
 	bool result = true;
 	for(;;){
@@ -555,10 +647,15 @@ bool close_tab(XmlTabs *tabs,XmlTab tab){
 			defer(false);
 		}
 		if(comp.indent == tab.indent
-		&& sv_eq(comp.type,tab.type) 
-		&& comp.tab_type == XM_OPEN) defer(true); 
+		&& sv_eq(get_sv_from_hashindex(comp.type), get_sv_from_hashindex(tab.type))
+		&& comp.tab_type == XM_OPEN){
+			free_tab(comp);
+			defer(true); 
+		}
+		free_tab(comp);
 	}
 defer:
+	free_tab(tab);
 	return result;
 }
 
@@ -574,8 +671,8 @@ bool parse_content(String_View *content,XmlTabs *tabs,String_Builder *out,size_t
 			case XM_OPEN:{
 				tab.indent = indent++;
 				da_append(tabs,tab);
-				if(sv_eq(tab.type,end)) defer(false);
-				if(sv_eq(tab.type,TEXTSPAN_SV)){ 
+				if(sv_eq(get_sv_from_hashindex(tab.type),end)) defer(false);
+				if(sv_eq(get_sv_from_hashindex(tab.type),TEXTSPAN_SV)){ 
 					if(!parse_content(content,tabs,&sb,indent,TEXTSPAN_SV)) defer(false);
 					--indent;
 					break;
@@ -586,15 +683,18 @@ bool parse_content(String_View *content,XmlTabs *tabs,String_Builder *out,size_t
 			case XM_CLOSE:{
 				tab.indent = --indent;
 				da_append(tabs,tab);
-				if(!close_tab(tabs,tab)) defer(false);
-				if(sv_eq(tab.type,end)) defer(true);
+				if(sv_eq(get_sv_from_hashindex(tab.type),end)){
+					if(!close_tab(tabs)) defer(false);
+					defer(true);
+				}
+				if(!close_tab(tabs)) defer(false);
 				TODO("close");
 				break;
 			}
 			case XM_CONTENT:{
 				tab.indent = indent;
 				da_append(tabs,tab);
-				sb_append_sv(&sb,tab.content);
+				sb_append_sv(&sb,get_sv_from_hashindex(tab.content));
 				sb_append(&sb,' ');
 				break;
 			}
@@ -613,11 +713,11 @@ defer:
 	return result;
 }
 
-bool parse_cell(String_View *content,XmlTabs *tabs,String_View *out,size_t indent){
+bool parse_cell(String_View *content,XmlTabs *tabs,HashIndex *out,size_t indent){
 	bool result = true;
 
 	XmlTab tab = {0};
-	String_Builder sb_out = {0};
+	static String_Builder sb_out = {0};//this will be leaked but that is fine
 
 	if(content->count == 0) TODO("EOF"); //means we ended premucutly
 	if(!get_next_tab(content,&tab))	TODO("FAILED TO GET TAB");
@@ -625,7 +725,7 @@ bool parse_cell(String_View *content,XmlTabs *tabs,String_View *out,size_t inden
 		case XM_OPEN:{
 			tab.indent = indent++;
 			da_append(tabs,tab);
-			if(!sv_eq(tab.type,CELL_SV)) TODO("not a cell");
+			if(!sv_eq(get_sv_from_hashindex(tab.type),CELL_SV)) TODO("not a cell");
 
 			size_t saved_indent = indent;
 			for(;;){
@@ -639,7 +739,8 @@ bool parse_cell(String_View *content,XmlTabs *tabs,String_View *out,size_t inden
 						tab.indent = indent++;
 						da_append(tabs,tab);
 						//this + 1 kinda sucks but oh well
-						if(indent == saved_indent + 1 && sv_eq(tab.type,TEXTP_SV)){
+						if(indent == saved_indent + 1 
+							&& sv_eq(get_sv_from_hashindex(tab.type),TEXTP_SV)){
 							if(!parse_content(content,tabs,&sb_out,indent,TEXTP_SV)) 
 								TODO("parse content failed");
 							--indent;//go back becauce it auto closes
@@ -649,8 +750,11 @@ bool parse_cell(String_View *content,XmlTabs *tabs,String_View *out,size_t inden
 					case XM_CLOSE:{
 						tab.indent = --indent;
 						da_append(tabs,tab);
-						if(!close_tab(tabs,tab)) defer(false);
-						if(sv_eq(tab.type,CELL_SV)) defer(true);
+						if(sv_eq(get_sv_from_hashindex(tab.type),CELL_SV)){
+							if(!close_tab(tabs)) defer(false);
+							defer(true);
+						}
+						if(!close_tab(tabs)) defer(false);
 						break;
 					}
 					case XM_CONTENT:{
@@ -682,30 +786,31 @@ bool parse_cell(String_View *content,XmlTabs *tabs,String_View *out,size_t inden
 		case XM_SELF_CONTAINED:{
 			tab.indent = indent;
 			da_append(tabs,tab);
-			if(!sv_eq(tab.type,CELL_SV)) TODO("not a cell");
+			if(!sv_eq(get_sv_from_hashindex(tab.type),CELL_SV)) TODO("not a cell");
 
-			if(!sv_eq(tab.type,CELL_SV)) defer(false);
 			//*out = SV_JS_NULL;
 			break;
 		}
 		case XM_CONTENT:{
 			tab.indent = indent;
 			da_append(tabs,tab);
-			if(!sv_eq(tab.type,CELL_SV)) TODO("not a cell");
 			TODO("content");
 			break;
 		}
 		case __XmlTabType_count:UNREACHABLE("xmltabtype_count in parse_cell");
 	}
 defer:
-	*out = sb_to_sv(sb_out);
+	*out = hash_add_sv(sb_to_sv(sb_out));
+	//sb_free(sb_out);
+	sb_out.count = 0;
+	//printf("result = %d\n", result);
 	return result; 
 }
 
-bool pull_cell(String_View *content,XmlTabs *tabs,uint64_t indent,String_View *out){
+bool pull_cell(String_View *content,XmlTabs *tabs,uint64_t indent,HashIndex *out){
 	/*
 	 * return true means to check the data
-	 * SV_EMPTY is error
+	 * HASHINDEX_EMPTY is error
 	 * return false means end of the row
 	 * mostly empty rows
 	 */
@@ -713,11 +818,11 @@ bool pull_cell(String_View *content,XmlTabs *tabs,uint64_t indent,String_View *o
 	XmlTab tab = {0};
 	if(content->count == 0){
 		nob_log(NOB_ERROR,"Premature EOF");//TODO: put location of __line__ __file__
-		*out = SV_EMPTY;
+		*out = HASHINDEX_EMPTY;
 		return true;
 	}
 	if(!get_next_tab(content,&tab)){
-		*out = SV_EMPTY;
+		*out = HASHINDEX_EMPTY;
 		return true;
 	}
 
@@ -725,22 +830,30 @@ bool pull_cell(String_View *content,XmlTabs *tabs,uint64_t indent,String_View *o
 	if(tab.tab_type == XM_CLOSE){
 		tab.indent = --indent;
 		da_append(tabs,tab);
-		if(!close_tab(tabs,tab)){
-			*out = SV_EMPTY;
+		
+		if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)){
+			if(!close_tab(tabs)){
+				*out = HASHINDEX_EMPTY;
+				return true;
+			}
+			return false;
+		}
+		if(!close_tab(tabs)){
+			*out = HASHINDEX_EMPTY;
 			return true;
 		}
-		if(sv_eq(tab.type,ROW_SV)) return false; 
 		else UNREACHABLE("unexpected in pull_cell");
 	}
 
+	free_tab(tab);
 	*content = sv_saved;
 	if(!parse_cell(content,tabs,out,indent)){
-		*out = SV_EMPTY;
+		*out = HASHINDEX_EMPTY;
 		return true;
 	}
 	//parse_cell can leave out empty so we cast that as "null" so as not to 
 	//be iterpreted as an error
-	if(IS_SV_EMPTY(*out)) *out = SV_JS_NULL;
+	//if(IS_SV_EMPTY(*out)) *out = SV_JS_NULL;
 	return true;
 }
 
@@ -754,46 +867,51 @@ bool parse_row(String_View *content,XmlTabs *tabs,uint64_t indent){
 	EN_Word en_word = {0};
 	Ankaso_Word ankaso_word = {0};
 
-	String_View text = {0};
-	if(!pull_cell(content,tabs,indent,&text)){
+	HashIndices his = {0};
+	HashIndex hi = {0};
+	if(!pull_cell(content,tabs,indent,&hi)){
 		//no root
 		defer(true);//junk
 	}
-	if(IS_SV_EMPTY(text)) defer(false);	
+	if(hi.generation == 0) defer(false) 	;
+	da_append(&his,hi);
 
-	if(!pull_cell(content,tabs,indent,&text)){
+	if(!pull_cell(content,tabs,indent,&hi)){
 		//no root
 		defer(true);//general
 	}
-	if(IS_SV_EMPTY(text)) defer(false);
-	en_word.general = get_entrys_from_sv(text);
+	if(hi.generation == 0) defer(false);
+	en_word.general = get_entrys_from_sv(get_sv_from_hashindex(hi));
+	da_append(&his,hi);
 	
-	if(!pull_cell(content,tabs,indent,&text)){
+	if(!pull_cell(content,tabs,indent,&hi)){
 		TODO("root early json");
 		defer(true);//root
 	}
-	if(IS_SV_EMPTY(text)) defer(false);
-	en_word.root     = text;
-	ankaso_word.root = text;
+	if(hi.generation == 0) defer(false);
+	en_word.root     = hi;
+	ankaso_word.root = hi;
+	da_append(&his,hi);
 
-	if(!pull_cell(content,tabs,indent,&text)){
+	if(!pull_cell(content,tabs,indent,&hi)){
 		TODO("root-meaning early json");
 		defer(true);//root-meaning
 	}
-	if(IS_SV_EMPTY(text)) defer(false);
-	en_word.root_meaning = get_entrys_from_sv(text);
+	if(hi.generation == 0) defer(false);
+	en_word.root_meaning = get_entrys_from_sv(get_sv_from_hashindex(hi));
+	da_append(&his,hi);
 
 	//TODO: factor out this svs
 	// :write ankaso_word
-	sb_append_json_sv(&ankaso_js_buffer,ankaso_word.root);
+	sb_append_json_sv(&ankaso_js_buffer,get_sv_from_hashindex(ankaso_word.root));
 	sb_append_sv(&ankaso_js_buffer,sv_from_cstr(": {\n"));
 	sb_append_sv(&ankaso_js_buffer,sv_from_cstr("\"root\":"));
-	sb_append_json_sv(&ankaso_js_buffer,ankaso_word.root);
+	sb_append_json_sv(&ankaso_js_buffer,get_sv_from_hashindex(ankaso_word.root));
 	sb_append(&ankaso_js_buffer,'\n');
 	sb_append_sv(&ankaso_js_buffer,sv_from_cstr("},"));
 
 	// :write en_word
-	sb_append_json_sv(&en_js_buffer,en_word.root);
+	sb_append_json_sv(&en_js_buffer,get_sv_from_hashindex(en_word.root));
 	sb_append_sv(&en_js_buffer,sv_from_cstr(": {\n"));
 	sb_append_sv(&en_js_buffer,sv_from_cstr("\"root\":"));
 	sb_append_json_svs(&en_js_buffer,en_word.root_meaning);
@@ -803,10 +921,14 @@ bool parse_row(String_View *content,XmlTabs *tabs,uint64_t indent){
 	sb_append(&en_js_buffer,'\n');
 	sb_append_sv(&en_js_buffer,sv_from_cstr("},"));
 	
-	while(pull_cell(content,tabs,indent,&text)){//junk...
-		if(IS_SV_EMPTY(text)) defer(false);
+	while(pull_cell(content,tabs,indent,&hi)){//junk...
+		if(hi.generation == 0) defer(false);
+		da_append(&his,hi);
 	}
 defer:
+	hash_remove_by_hashindices(his);
+	if(en_word.root_meaning.capacity > 0) da_free(en_word.root_meaning);
+	if(en_word.general.capacity > 0)      da_free(en_word.general);
 	return result;
 }
 
@@ -821,8 +943,8 @@ bool parse_dict(String_View *content,XmlTabs *tabs,uint64_t indent){
 	nob_log(NOB_INFO,"skiping columns");
 	for(;;){	
 		if(content->count == 0){
-			printf("premuture EOF\n");
-			defer(false); //means we ended premucutly
+			nob_log(NOB_ERROR,"premuture EOF");
+			defer(false);
 		}
 		if(!get_next_tab(content,&tab)) defer(false);
 		static_assert(__XmlTabType_count == 4,"update parse_dict\n");
@@ -830,7 +952,7 @@ bool parse_dict(String_View *content,XmlTabs *tabs,uint64_t indent){
 			case XM_OPEN:{
 				tab.indent = indent++;
 				da_append(tabs,tab);
-				if(sv_eq(tab.type,ROW_SV)){
+				if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)){
 					if(indent - 1 != start) defer(false);
 					--indent;
 					goto over_columns;
@@ -841,20 +963,20 @@ bool parse_dict(String_View *content,XmlTabs *tabs,uint64_t indent){
 				tab.indent = --indent;
 				da_append(tabs,tab);
 				TODO("close");
-				if(sv_eq(tab.type,ROW_SV)) goto over_columns;
+				if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)) goto over_columns;
 				break;
 			}
 			case XM_CONTENT:{
 				tab.indent = indent;
 				da_append(tabs,tab);
 				TODO("content");
-				if(sv_eq(tab.type,ROW_SV)) goto over_columns;
+				if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)) goto over_columns;
 				break;
 			}
 			case XM_SELF_CONTAINED:{
 				tab.indent = indent;
 				da_append(tabs,tab);
-				if(sv_eq(tab.type,ROW_SV)){
+				if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)){
 					if(indent != start) defer(false);
 					goto over_columns;
 				}
@@ -873,11 +995,11 @@ bool parse_dict(String_View *content,XmlTabs *tabs,uint64_t indent){
 	sb_append_sv(&en_js_buffer,sv_from_cstr("{\n"));
 	for(;;){
 		if(content->count == 0){
-			printf("premuture EOF\n");
-			defer(false); //means we ended premucutly
+			nob_log(NOB_ERROR,"premuture EOF");
+			defer(false); 
 		}
 		if(!get_next_tab(content,&tab)){
-			printf("failed to get_next_tab\n");
+			nob_log(NOB_ERROR,"failed to get_next_tab");
 			defer(false);
 		}
 		static_assert(__XmlTabType_count == 4,"update parse_dict\n");
@@ -885,7 +1007,7 @@ bool parse_dict(String_View *content,XmlTabs *tabs,uint64_t indent){
 			case XM_OPEN:{
 				tab.indent = indent++;
 				da_append(tabs,tab);
-				if(sv_eq(tab.type,ROW_SV)){	
+				if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)){	
 					if(first_row){ 
 						if(!parse_first_row(content,tabs,indent)) defer(false); 
 						first_row = false;
@@ -899,26 +1021,27 @@ bool parse_dict(String_View *content,XmlTabs *tabs,uint64_t indent){
 			case XM_CLOSE:{
 				tab.indent = --indent;
 				da_append(tabs,tab);
-				if(!close_tab(tabs,tab)) defer(false);
 				//this -1 is kinda ugly
-				if(tab.indent == start - 1){
-					if(sv_eq(tab.type,TABLE_SV)) goto over_rows;
+				if(tab.indent == start - 1 && sv_eq(get_sv_from_hashindex(tab.type),TABLE_SV)){
+					if(!close_tab(tabs)) defer(false);
+					goto over_rows;
 				}
+				if(!close_tab(tabs)) defer(false);
 				break;
 			}
 			case XM_CONTENT:{
 				tab.indent = indent;
 				da_append(tabs,tab);
-				TODO("OPEN row");
+				TODO("content in row");
 				break;
 			}
 			case XM_SELF_CONTAINED:{
 				tab.indent = indent;
 				da_append(tabs,tab);
 
-				TODO("sc");
-				if(sv_eq(tab.type,ROW_SV)){}
-				printf(SV_Fmt"\n",SV_Arg(tab.type));
+				TODO("sc in row");
+				if(sv_eq(get_sv_from_hashindex(tab.type),ROW_SV)){}
+				//printf(SV_Fmt"\n",SV_Arg(tab.type));
 				break;
 			}
 			case __XmlTabType_count:UNREACHABLE("XmlTabType_count found in parse column in parse_dict");
@@ -939,6 +1062,11 @@ bool parse_tabs(String_View content){
 	XmlTab tab = {0};	
 	uint64_t indent = 0;
 	for(;;){
+		/*
+		static size_t i = 0;
+		++i;
+		printf("i:%lu\n",i);
+		*/
 		if(content.count == 0) defer(true); //TODO: EOF
 		if(!get_next_tab(&content,&tab)) defer(false);
 
@@ -947,12 +1075,12 @@ bool parse_tabs(String_View content){
 			case XM_OPEN:{
 				tab.indent = indent++;
 				da_append(&tabs,tab);
-				if(sv_eq(tab.type, sv_from_cstr(TABLE_STR))){
+				if(sv_eq(get_sv_from_hashindex(tab.type), sv_from_cstr(TABLE_STR))){
 					//TODO: less hardcoding
 					int i = get_attribute(tab,sv_from_cstr("table:name"));
 					if(i < 0) defer(false);
 					//printf(SV_Fmt"\n",SV_Arg(tab.atts.items[i].value));
-					if(sv_eq(tab.atts.items[i].value,DICT_SHEET_SV)){
+					if(sv_eq(get_sv_from_hashindex(tab.atts.items[i].value),DICT_SHEET_SV)){
 						nob_log(NOB_INFO,"parsing "SV_Fmt,SV_Arg(DICT_SHEET_SV));
 						if(!parse_dict(&content,&tabs,indent)) defer(false);
 						--indent;
@@ -964,7 +1092,7 @@ bool parse_tabs(String_View content){
 			case XM_CLOSE:{
 				tab.indent = --indent;
 				da_append(&tabs,tab);
-				if(!close_tab(&tabs,tab)) defer(false);
+				if(!close_tab(&tabs)) defer(false);
 				break;
 			}
 			case XM_CONTENT:{
@@ -975,17 +1103,21 @@ bool parse_tabs(String_View content){
 			case XM_SELF_CONTAINED:{
 				tab.indent = indent;
 				da_append(&tabs,tab);
-				if(sv_eq(tab.type, sv_from_cstr(TABLE_STR))) UNREACHABLE("FOUND EMPTY TABLE");
+				if(sv_eq(get_sv_from_hashindex(tab.type),sv_from_cstr(TABLE_STR))) 
+					UNREACHABLE("FOUND EMPTY TABLE");
 				break;
 			}
 			case __XmlTabType_count:UNREACHABLE("XmlTabType_count found in parse_tabs");
 		}
 	}
 defer:
-	//TODO: make it not complain
-	//otherwise MEMORYLEAK is fine tho
-	//mz_free((void*)content.data);
-	//free(content.data);
+	if(tabs.count > 1) nob_log(NOB_WARNING,"number left in da besides first tab after parsing: %lu",tabs.count - 1);
+	while(tabs.count > 0){
+		//free any leftover tabs
+		XmlTab t = da_pop(&tabs);
+		free_tab(t);
+	}
+	da_free(tabs);
 	return result;
 }
 
@@ -1007,11 +1139,33 @@ defer:
 
 int main(void){
 	int result = 0;
-	String_View content;
+	String_View content = {0};
 	if(!get_content(&content)) defer(1);
 	if(!parse_tabs(content)) defer(1);
-	//TODO: free content
+
+	{//fail safe if memory didn't clean
+		size_t bc  = 0;
+		size_t svs = 0;
+		for(size_t i = 0;i < HASH_TABLE_SIZE;++i){
+			//TODO: find the issue
+			//clang is being overly pandantic to get any usfully information out of it
+			//and gcc is crap
+			if(reftable.ref_counts[i] > 0)
+			{
+				String_View sv = reftable.svs[i];
+				bc += sv.count;
+				++svs;
+				//printf(SV_Fmt"\n",SV_Arg(sv));
+				sv_free(sv);
+			}
+		}
+		if(bc > 0 || svs > 0) nob_log(NOB_WARNING,"bytes freed and left in table: %zu,svs_count: %zu",bc,svs);
+	}
+
+	sv_free(content);
 	if(!dump_json()) defer(1);
+	sb_free(en_js_buffer);
+	sb_free(ankaso_js_buffer);
 defer:
 	return result;
 }
