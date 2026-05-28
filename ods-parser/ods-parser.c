@@ -1111,7 +1111,7 @@ bool parse_tabs(String_View content){
 		}
 	}
 defer:
-	if(tabs.count > 1) nob_log(NOB_WARNING,"number left in da besides first tab after parsing: %lu",tabs.count - 1);
+	if(tabs.count > 1) nob_log(NOB_WARNING,"number left in da besides first tab after parsing: %zu",tabs.count - 1);
 	while(tabs.count > 0){
 		//free any leftover tabs
 		XmlTab t = da_pop(&tabs);
